@@ -1,6 +1,6 @@
 {
   "name": "Oshwsp",
   "tagline": "Open Source Hardware Sensor Platform",
-  "body": "### Welcome to OSHWSP project\r\nIn this project we offer an affordable open source hardware and software platform\r\nbased on inertial wearable sensors in a way that several groups could cooperate\r\nin the construction of datasets through common software suitable for\r\ncollaboration. Some experimental results about the throughput of the overall system are\r\nreported showing the feasibility of acquiring data from up to 6 sensors with\r\na sampling frequency no less than 118Hz. Also, an proof-of-concept dataset is provided comprising sampled data from 12 subjects.\r\n\r\n\r\nWe hope this site will be finished and ready to be use in a few days! ",
+  "body": "### Welcome to OSHWSP project\r\nIn this project we offer an affordable open source hardware and software platform\r\nbased on inertial wearable sensors in a way that several groups could cooperate\r\nin the construction of datasets through common software suitable for\r\ncollaboration. Some experimental results about the throughput of the overall system are\r\nreported showing the feasibility of acquiring data from up to 6 sensors with\r\na sampling frequency no less than 118Hz. ",
   "note": "Don't delete this file! It's used internally to help with page regeneration."
 }
