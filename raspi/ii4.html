@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta name="Generator" content="Kate, the KDE Advanced Text Editor" />
+<title>ii4.c</title>
+</head>
+<body>
+<pre style='color:#1f1c1b;background-color:#ffffff;'>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;sys/types.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;sys/stat.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;unistd.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;stdio.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;stdlib.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;getopt.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;string.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;signal.h&gt;</span>
+
+<span style='color:#006e28;'>#ifdef</span><span style='color:#006e28;'> _WIN32</span>
+<span style='color:#006e28;'>#define random rand</span>
+<span style='color:#006e28;'>#else</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;unistd.h&gt;</span>
+<span style='color:#006e28;'>#endif</span>
+
+<span style='color:#006e28;'>#ifdef</span><span style='color:#006e28;'> CMAKE_BUILD</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&quot;lws_config.h&quot;</span>
+<span style='color:#006e28;'>#endif</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>char</span> *nombre = <span style='color:#bf0303;'>&quot;IDUS-22-01-2015&quot;</span>;
+
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&quot;libwebsockets.h&quot;</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>unsigned</span> <span style='color:#0057ae;'>int</span> opts;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> se_cerro;  <span style='color:#898887;'>/*</span><span style='color:#898887;'> sirve para marcar el cierre del websocket desde el servidor </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> deny_deflate;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> deny_mux;
+<span style='color:#0057ae;'>static</span> <b>struct</b> libwebsocket *wsi_mirror;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> mirror_lifetime = <span style='color:#b08000;'>0</span>;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>volatile</span> <span style='color:#0057ae;'>int</span> force_exit = <span style='color:#b08000;'>0</span>;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> longlived = <span style='color:#b08000;'>0</span>;
+
+<span style='color:#006e28;'>#define ARCHIVIN </span><span style='color:#006e28;'>&quot;./leaf.jpg&quot;</span>
+<span style='color:#006e28;'>#define CANTIDAD    1024L     </span><span style='color:#898887;'>/*</span><span style='color:#898887;'> cantidad de bytes que se transfieren en cada envío </span><span style='color:#898887;'>*/</span>
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>char</span> *nombreArchivo = ARCHIVIN;
+<span style='color:#0057ae;'>static</span> FILE *fdatos = NULL;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>long</span> <span style='color:#0057ae;'>int</span> ifdatos   = <span style='color:#b08000;'>0</span>;        <span style='color:#898887;'>/*</span><span style='color:#898887;'> numero de fragmento a enviar a continuacion </span><span style='color:#898887;'>*/</span>
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>long</span> <span style='color:#0057ae;'>int</span> nfdatos   = <span style='color:#b08000;'>0</span>;    <span style='color:#898887;'>/*</span><span style='color:#898887;'> datos que quedan por transferir </span><span style='color:#898887;'>*/</span>
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>long</span> <span style='color:#0057ae;'>int</span> tfdatos   = CANTIDAD; <span style='color:#898887;'>/*</span><span style='color:#898887;'> datos a transferir en cada envio </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> websockeservertID = <span style='color:#b08000;'>0</span>; <span style='color:#898887;'>/*</span><span style='color:#898887;'> numero que le da el servidor a este cliente </span><span style='color:#898887;'>*/</span>
+<span style='color:#898887;'>/*</span>
+<span style='color:#898887;'> *  RaspiToPC-protocol:  we connect to the server and print the primitive</span>
+<span style='color:#898887;'> *            we are given</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+
+<b>enum</b> mis_protocolos {
+
+   PROTOCOLO_SENSORES,
+
+   <span style='color:#898887;'>/*</span><span style='color:#898887;'> always last </span><span style='color:#898887;'>*/</span>
+   DEMO_PROTOCOL_COUNT
+};
+
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> dumb_increment protocol </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span>
+callback_protocolo_sensores(<b>struct</b> libwebsocket_context *context,
+                            <b>struct</b> libwebsocket *wsi,
+                            <b>enum</b> libwebsocket_callback_reasons evento,
+                            <span style='color:#0057ae;'>void</span> *user, <span style='color:#0057ae;'>void</span> *in, size_t len) {
+   <span style='color:#0057ae;'>unsigned</span> <span style='color:#0057ae;'>char</span> buf[LWS_SEND_BUFFER_PRE_PADDING + <span style='color:#b08000;'>4096</span> +
+                     LWS_SEND_BUFFER_POST_PADDING];
+   <span style='color:#0057ae;'>int</span> nbytes_netos    = <span style='color:#b08000;'>0</span>;
+   <span style='color:#0057ae;'>int</span> nbytes_enviados = <span style='color:#b08000;'>0</span>;
+
+   <b>switch</b> (evento) {
+   <b>case</b> LWS_CALLBACK_CLIENT_ESTABLISHED:
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;callback_protocolo_sensores: LWS_CALLBACK_CLIENT_ESTABLISHED</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;Saludo inicial...</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stderr);
+     <span style='color:#898887;'>/*</span>
+<span style='color:#898887;'>      * start the ball rolling,</span>
+<span style='color:#898887;'>      * LWS_CALLBACK_CLIENT_WRITEABLE will come next service</span>
+<span style='color:#898887;'>      </span><span style='color:#898887;'>*/</span>
+      nbytes_netos    = sprintf((<span style='color:#0057ae;'>char</span> *)&amp;buf[LWS_SEND_BUFFER_PRE_PADDING],
+                                <span style='color:#bf0303;'>&quot;/saludo %s&quot;</span>, nombre);
+      nbytes_enviados = libwebsocket_write(wsi,
+         &amp;buf[LWS_SEND_BUFFER_PRE_PADDING], nbytes_netos, opts | LWS_WRITE_TEXT);
+
+      printf(<span style='color:#bf0303;'>&quot;saludo enviado</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+      <span style='color:#898887;'>/*</span>
+<span style='color:#898887;'>      if (nbytes_enviados &lt; 0)</span>
+<span style='color:#898887;'>         return -1;</span>
+<span style='color:#898887;'>      if (nbytes_enviados &lt; nbytes_netos) {</span>
+<span style='color:#898887;'>         lwsl_err(&quot;Escritura parcial LWS_CALLBACK_CLIENT_WRITEABLE\n&quot;);</span>
+<span style='color:#898887;'>         return -1;</span>
+<span style='color:#898887;'>      }</span>
+<span style='color:#898887;'>      </span><span style='color:#898887;'>*/</span>
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;Esperando peticiones del pc</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stderr);
+
+      <b>break</b>;
+
+   <b>case</b> LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;LWS_CALLBACK_CLIENT_CONNECTION_ERROR</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+      se_cerro = <span style='color:#b08000;'>1</span>;
+      <b>break</b>;
+
+   <b>case</b> LWS_CALLBACK_CLOSED:
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;LWS_CALLBACK_CLOSED</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+      se_cerro = <span style='color:#b08000;'>1</span>;
+      <b>break</b>;
+
+   <b>case</b> LWS_CALLBACK_CLIENT_RECEIVE:
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;rx %d '%*s'</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, (<span style='color:#0057ae;'>int</span>)len, (<span style='color:#0057ae;'>int</span>) len, (<span style='color:#0057ae;'>char</span> *)in); fflush(stderr);
+
+ <span style='color:#898887;'>/*</span><span style='color:#898887;'>RET00</span><span style='color:#898887;'>*/</span>
+      <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;RET00&quot;</span>, <span style='color:#b08000;'>5</span>)) {        <span style='color:#898887;'>/*</span><span style='color:#898887;'> respuesta de /saludo </span><span style='color:#898887;'>*/</span>
+         *((<span style='color:#0057ae;'>char</span> *)in+len)=<span style='color:#924c9d;'>'\0'</span>; <span style='color:#898887;'>/*</span><span style='color:#898887;'> construye un NTS </span><span style='color:#898887;'>*/</span>
+         sscanf((<span style='color:#0057ae;'>char</span> *) in + <span style='color:#b08000;'>5</span>, <span style='color:#bf0303;'>&quot;%d&quot;</span>, &amp;websockeservertID);
+         printf(<span style='color:#bf0303;'>&quot;El identificador del servidor es: %d</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, websockeservertID);
+ <span style='color:#898887;'>/*</span><span style='color:#898887;'>FILE-</span><span style='color:#898887;'>*/</span>
+      <span style='color:#898887;'>/*</span><span style='color:#898887;'> Aquí hay que procesar FILE-</span>
+<span style='color:#898887;'>       * 1º enviar FILE con /06 talla blocksize</span>
+<span style='color:#898887;'>       * 2º esperar /RET60 (archivo abierto listo para recibir)</span>
+<span style='color:#898887;'>       *          o /RET61 (error leyendo parametros de transferencia)</span>
+<span style='color:#898887;'>       </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;FILE-&quot;</span>, <span style='color:#b08000;'>5</span>)) {        <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /06 </span><span style='color:#898887;'>*/</span>
+        <b>struct</b> stat infoFile;
+
+        printf(<span style='color:#bf0303;'>&quot;Hay que abrir el archivo</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+        <b>if</b> (fdatos || (fdatos = fopen(nombreArchivo, <span style='color:#bf0303;'>&quot;rb&quot;</span>))) {
+          fstat(fileno(fdatos), &amp;infoFile);
+          nfdatos = infoFile.st_size;
+          tfdatos = CANTIDAD;
+          printf(<span style='color:#bf0303;'>&quot;Fichero abierto para enviar</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+        } <b>else</b> {
+          printf(<span style='color:#bf0303;'>&quot;Imposible abrir archivo</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+          <b>return</b> -<span style='color:#b08000;'>1</span>;
+        }
+
+
+        nbytes_netos    = sprintf((<span style='color:#0057ae;'>char</span> *)&amp;buf[LWS_SEND_BUFFER_PRE_PADDING],
+                                  <span style='color:#bf0303;'>&quot;/06 %ld %ld&quot;</span>, nfdatos, CANTIDAD);
+        nbytes_enviados = libwebsocket_write(wsi,
+           &amp;buf[LWS_SEND_BUFFER_PRE_PADDING], nbytes_netos, opts | LWS_WRITE_TEXT);
+
+ <span style='color:#898887;'>/*</span><span style='color:#898887;'>RET60</span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;RET60&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> /06 -&gt; </span><span style='color:#898887;'>*/</span>
+         printf(<span style='color:#bf0303;'>&quot;Invocado el OK para empezar a enviar datos</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+
+         tfdatos = (tfdatos &lt; nfdatos ) ? tfdatos : nfdatos;
+
+         <b>if</b> (tfdatos != fread((<span style='color:#0057ae;'>void</span> *) buf+LWS_SEND_BUFFER_PRE_PADDING,
+                            <span style='color:#b08000;'>1</span>, tfdatos, fdatos)) {
+            printf(<span style='color:#bf0303;'>&quot;Imposible leer datos</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         }
+         nbytes_enviados = libwebsocket_write(wsi,
+                    &amp;buf[LWS_SEND_BUFFER_PRE_PADDING], tfdatos, opts | LWS_WRITE_BINARY);
+
+         nfdatos -= tfdatos;
+         ifdatos++;
+         <b>if</b> (nfdatos &lt;= <span style='color:#b08000;'>0</span>) {
+            fclose(fdatos);
+            fdatos  = NULL ;
+            nfdatos = <span style='color:#b08000;'>0</span>;
+            ifdatos = <span style='color:#b08000;'>0</span>;
+         } <b>else</b> {
+            libwebsocket_callback_on_writable(context, wsi);
+         }
+ <span style='color:#898887;'>/*</span><span style='color:#898887;'>RET61</span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;RET61&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> /06 -&gt; </span><span style='color:#898887;'>*/</span>
+         printf(<span style='color:#bf0303;'>&quot;El PC no esta listo para recibir datos</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+         nfdatos = <span style='color:#b08000;'>0</span>;
+         fclose(fdatos);
+         ifdatos = <span style='color:#b08000;'>0</span>;
+ <span style='color:#898887;'>/*</span><span style='color:#898887;'>START</span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;START&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /00 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;STOP-&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /01 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;PAUSE&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /02 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;CHECK&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /03 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;RESET&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /04 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> <b>if</b> (len &gt;= <span style='color:#b08000;'>5</span> &amp;&amp; !memcmp(in, <span style='color:#bf0303;'>&quot;DATOS&quot;</span>, <span style='color:#b08000;'>5</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /05 </span><span style='color:#898887;'>*/</span>
+      } <b>else</b> {  <span style='color:#898887;'>/*</span><span style='color:#898887;'> -&gt; /10 </span><span style='color:#898887;'>*/</span>
+         printf(<span style='color:#bf0303;'>&quot;Mandato de la Raspi no conocido</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+        <b>return</b> -<span style='color:#b08000;'>1</span>;
+      }
+      <b>break</b>;
+
+   <b>case</b> LWS_CALLBACK_CLIENT_WRITEABLE:
+     printf(<span style='color:#bf0303;'>&quot;---%ld,</span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>&quot;</span>, nfdatos); fflush(stdout);
+     <span style='color:#898887;'>/*</span><span style='color:#898887;'> si fdatos != NULL es que se esta dando una transferencia.</span>
+<span style='color:#898887;'>      </span><span style='color:#898887;'>*/</span>
+     <b>if</b> (fdatos) {
+         tfdatos = (tfdatos &lt; nfdatos ) ? tfdatos : nfdatos;
+         <b>if</b> (tfdatos != fread((<span style='color:#0057ae;'>void</span> *) buf + LWS_SEND_BUFFER_PRE_PADDING,
+                            <span style='color:#b08000;'>1</span>, tfdatos, fdatos)) {
+            printf(<span style='color:#bf0303;'>&quot;Imposible leer datos</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         }
+         nbytes_enviados = libwebsocket_write(wsi,
+                    &amp;buf[LWS_SEND_BUFFER_PRE_PADDING], tfdatos, opts | LWS_WRITE_BINARY);
+
+         nfdatos -= tfdatos;
+         ifdatos++;
+         <b>if</b> (nfdatos &lt;= <span style='color:#b08000;'>0</span>) {
+            fclose(fdatos);
+            fdatos  = NULL ;
+            nfdatos = <span style='color:#b08000;'>0</span>;
+            ifdatos = <span style='color:#b08000;'>0</span>;
+         } <b>else</b> {
+            libwebsocket_callback_on_writable(context, wsi);
+         }
+     }
+     <b>break</b>;
+
+   <span style='color:#898887;'>/*</span><span style='color:#898887;'> si somos el primer elemento de protocolos[0] ... </span><span style='color:#898887;'>*/</span>
+   <b>case</b> LWS_CALLBACK_CLIENT_CONFIRM_EXTENSION_SUPPORTED:
+      <b>if</b> ((strcmp(in, <span style='color:#bf0303;'>&quot;deflate-stream&quot;</span>) == <span style='color:#b08000;'>0</span>) &amp;&amp; deny_deflate) {
+         fprintf(stderr, <span style='color:#bf0303;'>&quot;denied deflate-stream extension</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         <b>return</b> <span style='color:#b08000;'>1</span>;
+      }
+      <b>if</b> ((strcmp(in, <span style='color:#bf0303;'>&quot;deflate-frame&quot;</span>) == <span style='color:#b08000;'>0</span>) &amp;&amp; deny_deflate) {
+         fprintf(stderr, <span style='color:#bf0303;'>&quot;denied deflate-frame extension</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         <b>return</b> <span style='color:#b08000;'>1</span>;
+      }
+      <b>if</b> ((strcmp(in, <span style='color:#bf0303;'>&quot;x-google-mux&quot;</span>) == <span style='color:#b08000;'>0</span>) &amp;&amp; deny_mux) {
+         fprintf(stderr, <span style='color:#bf0303;'>&quot;denied x-google-mux extension</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         <b>return</b> <span style='color:#b08000;'>1</span>;
+      }
+      <b>break</b>;
+
+   <b>default</b>: <b>break</b>;
+   }
+
+   <b>return</b> <span style='color:#b08000;'>0</span>;
+}
+
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> list of supported protocols and callbacks </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#0057ae;'>static</span> <b>struct</b> libwebsocket_protocols protocolos[] = {
+   {
+      <span style='color:#bf0303;'>&quot;RaspiToPC-protocol, proprietary-sensoring-protocol&quot;</span>,
+      callback_protocolo_sensores,
+      <span style='color:#b08000;'>0</span>,
+      <span style='color:#b08000;'>4096</span>
+   },
+   { NULL, NULL, <span style='color:#b08000;'>0</span>, <span style='color:#b08000;'>0</span> } <span style='color:#898887;'>/*</span><span style='color:#898887;'> end </span><span style='color:#898887;'>*/</span>
+};
+
+<span style='color:#0057ae;'>void</span> sighandler(<span style='color:#0057ae;'>int</span> sig)
+{
+   force_exit = <span style='color:#b08000;'>1</span>;
+}
+
+<span style='color:#0057ae;'>int</span> main(<span style='color:#0057ae;'>int</span> argc, <span style='color:#0057ae;'>char</span> **argv) {
+   <span style='color:#0057ae;'>int</span> n = <span style='color:#b08000;'>0</span>;
+   <span style='color:#0057ae;'>int</span> ret = <span style='color:#b08000;'>0</span>;
+   <span style='color:#0057ae;'>int</span> port = <span style='color:#b08000;'>8080</span>;
+   <span style='color:#0057ae;'>int</span> use_ssl = <span style='color:#b08000;'>0</span>; <span style='color:#898887;'>/*</span><span style='color:#898887;'> sin ssl </span><span style='color:#898887;'>*/</span>
+   <b>struct</b> libwebsocket_context *context;
+   <span style='color:#0057ae;'>const</span> <span style='color:#0057ae;'>char</span> *address = <span style='color:#bf0303;'>&quot;localhost&quot;</span>;
+   <b>struct</b> libwebsocket *wsi_elPC;
+   <span style='color:#0057ae;'>int</span> ietf_version = -<span style='color:#b08000;'>1</span>; <span style='color:#898887;'>/*</span><span style='color:#898887;'> latest </span><span style='color:#898887;'>*/</span>
+
+   <span style='color:#898887;'>/*</span><span style='color:#898887;'> para enviar el primer mensaje </span><span style='color:#898887;'>*/</span>
+   <span style='color:#0057ae;'>unsigned</span> <span style='color:#0057ae;'>char</span> buf[LWS_SEND_BUFFER_PRE_PADDING + <span style='color:#b08000;'>4096</span> +
+                     LWS_SEND_BUFFER_POST_PADDING];
+   <span style='color:#0057ae;'>int</span> nbytes_netos    = <span style='color:#b08000;'>0</span>;
+   <span style='color:#0057ae;'>int</span> nbytes_enviados = <span style='color:#b08000;'>0</span>;
+
+   fprintf(stderr, <span style='color:#bf0303;'>&quot;Cliente de libwebsockets on Raspberry-pi</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+
+   signal(SIGINT, sighandler);
+
+   <span style='color:#898887;'>/*</span>
+<span style='color:#898887;'>    * create the websockets context.  This tracks open connections and</span>
+<span style='color:#898887;'>    * knows how to route any traffic and which protocol version to use,</span>
+<span style='color:#898887;'>    * and if each connection is client or server side.</span>
+<span style='color:#898887;'>    *</span>
+<span style='color:#898887;'>    * For this client-only demo, we tell it to not listen on any port.</span>
+<span style='color:#898887;'>    </span><span style='color:#898887;'>*/</span>
+   <b>struct</b> lws_context_creation_info info;
+   memset(&amp;info, <span style='color:#b08000;'>0</span>, <b>sizeof</b> info);
+
+   info.port = CONTEXT_PORT_NO_LISTEN;
+   info.protocols = protocolos;
+<span style='color:#006e28;'>#ifndef</span><span style='color:#006e28;'> LWS_NO_EXTENSIONS</span>
+   info.extensions = libwebsocket_get_internal_extensions();
+<span style='color:#006e28;'>#endif</span>
+   info.gid = -<span style='color:#b08000;'>1</span>;
+   info.uid = -<span style='color:#b08000;'>1</span>;
+
+   context = libwebsocket_create_context(&amp;info);
+   <b>if</b> (context == NULL) {
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;Creación fallida del contexto libwebsocket</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+      <b>return</b> <span style='color:#b08000;'>1</span>;
+   }
+
+   <span style='color:#898887;'>/*</span><span style='color:#898887;'> create a client websocket using RaspiToPC-protocol </span><span style='color:#898887;'>*/</span>
+
+   wsi_elPC = libwebsocket_client_connect(context, address, port, use_ssl,
+         <span style='color:#bf0303;'>&quot;/&quot;</span>, <span style='color:#bf0303;'>&quot;localhost&quot;</span>, <span style='color:#bf0303;'>&quot;localhost&quot;</span>, <span style='color:#898887;'>/*</span><span style='color:#898887;'> argv[optind], argv[optind], </span><span style='color:#898887;'>*/</span>
+          protocolos[PROTOCOLO_SENSORES].name, ietf_version);
+
+   <b>if</b> (wsi_elPC == NULL) {
+      fprintf(stderr, <span style='color:#bf0303;'>&quot;libwebsocket conexión con PC fallido</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+      ret = <span style='color:#b08000;'>1</span>;
+   } <b>else</b> {
+      <span style='color:#898887;'>/*</span><span style='color:#898887;'> sit there servicing the websocket context to handle incoming</span>
+<span style='color:#898887;'>       * packets,.... nothing happens until the client websocket connection is</span>
+<span style='color:#898887;'>       * asynchronously established</span>
+<span style='color:#898887;'>       </span><span style='color:#898887;'>*/</span>
+      <span style='color:#0057ae;'>int</span> n = <span style='color:#b08000;'>0</span>;
+
+      <b>while</b> (n &gt;= <span style='color:#b08000;'>0</span> &amp;&amp; !se_cerro &amp;&amp; !force_exit) {
+         n = libwebsocket_service(context, <span style='color:#b08000;'>1</span>);
+
+         <b>if</b> (n &lt; <span style='color:#b08000;'>0</span>)
+            <b>continue</b>;
+      }
+   }
+
+   fprintf(stderr, <span style='color:#bf0303;'>&quot;Exiting</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+
+   libwebsocket_context_destroy(context);
+
+   <b>return</b> ret;
+}
+</pre>
+</body>
+</html>
