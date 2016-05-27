@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+<meta name="Generator" content="Kate, the KDE Advanced Text Editor" />
+<title>rest.c</title>
+</head>
+<body>
+<pre style='color:#1f1c1b;background-color:#ffffff;'>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;stdio.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;string.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;stdlib.h&gt;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&lt;signal.h&gt;</span>
+
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&quot;caratula.h&quot;</span>
+<span style='color:#006e28;'>#include </span><span style='color:#006e28;'>&quot;mongoose.h&quot;</span>
+
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>const</span> <span style='color:#0057ae;'>char</span> *s_no_cache_header =
+  <span style='color:#bf0303;'>&quot;Cache-Control: max-age=0, post-check=0, &quot;</span>
+  <span style='color:#bf0303;'>&quot;pre-check=0, no-store, no-cache, must-revalidate</span><span style='color:#924c9d;'>\r\n</span><span style='color:#bf0303;'>&quot;</span>;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> s_signal_received = <span style='color:#b08000;'>0</span>;
+<span style='color:#0057ae;'>static</span> <b>struct</b> mg_server *s_server = NULL;
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> nosvamos = <span style='color:#b08000;'>0</span>;
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> handle_websocket_message(<b>struct</b> mg_connection *conn) ;
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> Data associated with each websocket connection</span>
+<span style='color:#898887;'> * La idea es interesante pues habiendo varios websockets podemos</span>
+<span style='color:#898887;'> * muestrear de varias raspi.</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+<span style='color:#006e28;'>#define ARCHIVIN </span><span style='color:#006e28;'>&quot;leaf.jpg&quot;</span>
+
+<b>struct</b> conn_data {
+  <span style='color:#0057ae;'>unsigned</span>  iconexion;
+  <span style='color:#0057ae;'>int</span>       transmision;   <span style='color:#898887;'>/*</span><span style='color:#898887;'> !=0 (true) se ha pedido la transferencia o</span>
+<span style='color:#898887;'>                            * se está transfiriendo.</span>
+<span style='color:#898887;'>                            * en cualquier otro caso debe valer 0 (false). </span><span style='color:#898887;'>*/</span>
+  <span style='color:#0057ae;'>int</span>       nfdatos;       <span style='color:#898887;'>/*</span><span style='color:#898887;'> datos que quedan por transferir </span><span style='color:#898887;'>*/</span>
+  FILE      *fdatos;       <span style='color:#898887;'>/*</span><span style='color:#898887;'> descriptor del archivo  mientras hay</span>
+<span style='color:#898887;'>                            * transferencia. Si no, debe ser NULL </span><span style='color:#898887;'>*/</span>
+  <span style='color:#0057ae;'>char</span>      identidad[<span style='color:#b08000;'>16</span>];
+  <span style='color:#0057ae;'>unsigned</span>  blocksize ;    <span style='color:#898887;'>/*</span><span style='color:#898887;'> tamaño de bloque que se transmitirá </span><span style='color:#898887;'>*/</span>
+  <b>struct</b>    mg_connection *conexion_websocket;
+};
+
+<span style='color:#006e28;'>#define MAXDISPOSITIVOS 10</span>
+<span style='color:#0057ae;'>static</span> <b>struct</b> conn_data conn_abiertas[MAXDISPOSITIVOS];
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>unsigned</span> <span style='color:#0057ae;'>short</span> iconexiones = <span style='color:#b08000;'>0</span>;
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> conexión estable del servidor con la raspi es la 0 en este caso.</span>
+<span style='color:#898887;'> *</span><span style='color:#898887;'>*/</span>
+<span style='color:#006e28;'>#define RASPI 0 </span>
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>unsigned</span> <span style='color:#0057ae;'>short</span> iconexion_actual = RASPI;
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> XDDDD porque sólo tenemos la raspi actualmente </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> signal_handler(<span style='color:#0057ae;'>int</span> sig_num) {
+  <span style='color:#898887;'>// signal(sig_num, signal_handler);  // Reinstantiate signal handler</span>
+  s_signal_received = sig_num;
+  <b>if</b> (sig_num == SIGTERM || sig_num == SIGINT) nosvamos = <span style='color:#b08000;'>1</span>;
+}
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'>*************************************************************************************</span>
+<span style='color:#898887;'> * caratula() fabrica una página web en el marco de mongoose (mg_connection) con una línea</span>
+<span style='color:#898887;'> * (mensaje) de estatus, y con un contenido (cabecera y cola) que figuran en caratula.h.</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+<span style='color:#0057ae;'>void</span> caratula(<b>struct</b> mg_connection *conn, <span style='color:#0057ae;'>const</span> <span style='color:#0057ae;'>char</span> *mensaje) {
+  <span style='color:#0057ae;'>char</span> * funName = <span style='color:#bf0303;'>&quot;caratula&quot;</span>;
+
+      mg_printf_data(conn, <span style='color:#bf0303;'>&quot;%s&quot;</span>, cabecera);
+      mg_printf_data(conn, <span style='color:#bf0303;'>&quot;%s</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, mensaje);
+      mg_printf_data(conn, <span style='color:#bf0303;'>&quot;%s&quot;</span>, cola);
+}
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> handle_raspi(<b>struct</b> mg_connection *conn) { caratula(conn, <span style='color:#bf0303;'>&quot;RASPI-callback!!!&quot;</span>); }
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> handle_start(<b>struct</b> mg_connection *conn) { caratula(conn, <span style='color:#bf0303;'>&quot;START-callback!!!&quot;</span>); }
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> handle_stop(<b>struct</b> mg_connection *conn)  { caratula(conn, <span style='color:#bf0303;'>&quot;STOP--callback!!!&quot;</span>); }
+
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>int</span> ev_handler(<b>struct</b> mg_connection *conn, <b>enum</b> mg_event ev) {
+  <b>switch</b> (ev) {
+    <b>case</b> MG_AUTH: <b>return</b> MG_TRUE;
+    <b>case</b> MG_REQUEST:
+      <b>if</b> (conn-&gt;is_websocket) {
+        <b>struct</b> conn_data *conexion = (<b>struct</b> conn_data *) conn-&gt;connection_param;
+        <span style='color:#898887;'>/*</span><span style='color:#898887;'> de momento solo tenemos la raspi </span><span style='color:#898887;'>*/</span>
+           <b>if</b> (conexion-&gt;iconexion != RASPI) {
+               printf(<span style='color:#bf0303;'>&quot;Intento de comunicación desde fuera de la Raspi</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+               <b>return</b> MG_TRUE;
+           } <b>else</b> {
+              (<span style='color:#0057ae;'>void</span>) handle_websocket_message(conn);
+              <b>return</b> MG_TRUE;
+           }
+      } <b>else</b> {
+        <b>if</b> (!memcmp(conn-&gt;uri, <span style='color:#bf0303;'>&quot;/raspi&quot;</span>, <span style='color:#b08000;'>6</span>)) {
+           mg_send_file(conn, <span style='color:#bf0303;'>&quot;index.html&quot;</span>, NULL);  <span style='color:#898887;'>// Return MG_MORE after!</span>
+           <b>return</b> MG_MORE;
+        } <b>else</b> <b>if</b> (!memcmp(conn-&gt;uri, <span style='color:#bf0303;'>&quot;/start&quot;</span>, <span style='color:#b08000;'>6</span>)) {
+           <span style='color:#898887;'>/*</span><span style='color:#898887;'> enviar START por el websocket </span>
+<span style='color:#898887;'>            </span><span style='color:#898887;'>*/</span>
+           caratula(conn, <span style='color:#bf0303;'>&quot;START!!!&quot;</span>);
+           printf(<span style='color:#bf0303;'>&quot;enviando mensaje START a </span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'>%.16s</span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'> mediante websocket</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>,
+                   conn_abiertas[iconexion_actual].identidad); fflush(stdout);
+           mg_websocket_printf(conn_abiertas[iconexion_actual].conexion_websocket, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;START&quot;</span>);
+           <b>return</b> MG_MORE; <span style='color:#898887;'>/*</span><span style='color:#898887;'> he quitado MG_MORE </span><span style='color:#898887;'>*/</span>
+        } <b>else</b> <b>if</b> (!memcmp(conn-&gt;uri, <span style='color:#bf0303;'>&quot;/stop&quot;</span>, <span style='color:#b08000;'>5</span>)) {
+           <span style='color:#898887;'>/*</span><span style='color:#898887;'> enviar STOP por el websocket </span>
+<span style='color:#898887;'>            </span><span style='color:#898887;'>*/</span>
+           printf(<span style='color:#bf0303;'>&quot;enviando mensaje STOP- a </span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'>%.16s</span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'> mediante websocket</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>,
+                   conn_abiertas[iconexion_actual].identidad); fflush(stdout);
+           mg_websocket_printf(conn_abiertas[iconexion_actual].conexion_websocket, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;STOP-&quot;</span>);
+           caratula(conn, <span style='color:#bf0303;'>&quot;STOP!!!!&quot;</span>);
+           <b>return</b> MG_TRUE;
+        } <b>else</b> <b>if</b> (!memcmp(conn-&gt;uri, <span style='color:#bf0303;'>&quot;/file&quot;</span>, <span style='color:#b08000;'>5</span>)) {
+           <span style='color:#898887;'>/*</span><span style='color:#898887;'> pide archivo desde el dispositivo al PC.</span>
+<span style='color:#898887;'>            </span><span style='color:#898887;'>*/</span>
+           <b>if</b> (conn_abiertas[iconexion_actual].transmision) {
+             caratula(conn, <span style='color:#bf0303;'>&quot;ESPERE, transmision ya iniciada&quot;</span>);
+             printf(<span style='color:#bf0303;'>&quot;transmisión ya solicitada&quot;</span>); fflush(stdout);
+           } <b>else</b> {
+             caratula(conn, <span style='color:#bf0303;'>&quot;INICIANDO transmision&quot;</span>);
+             printf(<span style='color:#bf0303;'>&quot;enviando mensaje FILE- a </span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'>%.16s</span><span style='color:#924c9d;'>\&quot;</span><span style='color:#bf0303;'> mediante websocket</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>,
+                   conn_abiertas[iconexion_actual].identidad); fflush(stdout);
+             mg_websocket_printf(conn_abiertas[iconexion_actual].conexion_websocket, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;FILE-&quot;</span>);
+           }
+           <b>return</b> MG_TRUE;
+        } <b>else</b> {
+           printf(<span style='color:#bf0303;'>&quot;Primitiva no reconocida en la interfaz web</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+           <b>return</b> MG_FALSE;
+        }
+      }
+      <b>break</b>;
+    <b>case</b> MG_WS_CONNECT:
+      {
+         <b>struct</b> conn_data *conexion_actual = conn_abiertas + iconexiones;
+         memset(conexion_actual, <span style='color:#b08000;'>0x00</span>, <b>sizeof</b>(<b>struct</b> conn_data));
+         <span style='color:#898887;'>// New websocket connection. Send connection ID back to the client.</span>
+         conexion_actual-&gt;iconexion = iconexiones;   <span style='color:#898887;'>/*</span><span style='color:#898887;'> indice inverso </span><span style='color:#898887;'>*/</span>
+         conexion_actual-&gt;conexion_websocket = conn; <span style='color:#898887;'>/*</span><span style='color:#898887;'> referencia inversa </span><span style='color:#898887;'>*/</span>
+         conexion_actual-&gt;identidad[<span style='color:#b08000;'>0</span>] = <span style='color:#924c9d;'>'\0'</span>;       <span style='color:#898887;'>/*</span><span style='color:#898887;'> inicializar nombre </span><span style='color:#898887;'>*/</span>
+         conn-&gt;connection_param = conexion_actual;
+         iconexiones++;
+         printf(<span style='color:#bf0303;'>&quot;Comunicación #%d establecida con &lt;dispositivo&gt; desde [%.48s]</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>,
+                iconexiones, conn-&gt;remote_ip);
+      }
+      <b>return</b> MG_FALSE;
+    <b>case</b> MG_CLOSE:
+      {
+         <b>if</b> (conn-&gt;is_websocket) {
+            iconexiones--;
+            memset((<span style='color:#0057ae;'>void</span> *) &amp;(conn-&gt;connection_param), <span style='color:#b08000;'>0</span>, <b>sizeof</b>(<b>struct</b> conn_data));
+            printf(<span style='color:#bf0303;'>&quot;limpiado websocket</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+         }
+         <b>return</b> MG_TRUE;
+      }
+    <b>default</b>: <b>return</b> MG_FALSE;
+  }
+}
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> Protocolo de la raspi al PC</span>
+<span style='color:#898887;'> * return codigo de reconocimiento por cada primitiva enviada a la raspi.</span>
+<span style='color:#898887;'> * </span>
+<span style='color:#898887;'> * /saludo codigo-identificacion -&gt; RET00</span>
+<span style='color:#898887;'> * /estado codigo de estatus de la raspi</span>
+<span style='color:#898887;'> * /string string con datos a enviar de la raspi al PC en crudo.</span>
+<span style='color:#898887;'> * /archiv archivo devuelto a petición de los datos de sensores desde el PC.</span>
+<span style='color:#898887;'> * /cierre finalización de la comunicación desde la raspi.</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> Protocolo desde el PC a la raspi</span>
+<span style='color:#898887;'> * RET-- codigo de reconocimiento por cada primitiva enviada al PC</span>
+<span style='color:#898887;'> *       00 : OK</span>
+<span style='color:#898887;'> * START iniciar adquisición.  -&gt; /00</span>
+<span style='color:#898887;'> * STOP- parar la adquisición. -&gt; /01</span>
+<span style='color:#898887;'> * PAUSE pausar la adquisición.-&gt; /02</span>
+<span style='color:#898887;'> * CHECK averiguar el estado.  -&gt; /03</span>
+<span style='color:#898887;'> * RESET resetear el archivo de datos. -&gt; /04</span>
+<span style='color:#898887;'> * DATOS solicitar datos a la raspi desde el PC en modo continuo. -&gt; /05 y -&gt; /string por cada linea de datos.</span>
+<span style='color:#898887;'> * FILE- solicitar datos a la raspi desde el PC. -&gt; /06 TALLA BLOCKSIZE (tamaño del archivo y bytes por bloque, en modo WEBSOCKET_OPCODE_BINARY</span>
+<span style='color:#898887;'> *       el receptor debe recomponer el archivo y dejarlo correctamente.</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> se supone que solo va a ser invocado con conn_abierto</span>
+<span style='color:#898887;'> </span><span style='color:#898887;'>*/</span>
+<span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>void</span> handle_websocket_message(<b>struct</b> mg_connection *conn) {
+  <b>struct</b> conn_data *conexion= (<b>struct</b> conn_data *) conn-&gt;connection_param;
+  <span style='color:#0057ae;'>static</span> <span style='color:#0057ae;'>char</span> *datablock= NULL;
+
+  <span style='color:#898887;'>/*</span><span style='color:#898887;'> estamos hablando de un archivo </span><span style='color:#898887;'>*/</span>
+  <b>if</b> (WEBSOCKET_OPCODE_BINARY &amp; conn-&gt;wsbits) {
+     <b>if</b> (<span style='color:#b08000;'>0</span>==conexion-&gt;transmision) {
+       printf(<span style='color:#bf0303;'>&quot;[%p, %p] &quot;</span>, conn, conexion);
+       <span style='color:#898887;'>/*</span>
+<span style='color:#898887;'>       short x = conn-&gt;wsbits &amp; 0x000f;</span>
+<span style='color:#898887;'>       printf(&quot;%s &quot;,</span>
+<span style='color:#898887;'>          (0x000a == x)? &quot;PONG&quot; :</span>
+<span style='color:#898887;'>             ((0x0002 == x)? &quot;BING&quot; : &quot;!&quot;));</span>
+<span style='color:#898887;'>             </span><span style='color:#898887;'>*/</span>
+       <span style='color:#898887;'>/*</span><span style='color:#898887;'> printf(&quot;[%x] &quot;, conn-&gt;wsbits); </span><span style='color:#898887;'>*/</span>
+       <span style='color:#898887;'>/*</span><span style='color:#898887;'> printf(&quot;Intento de comunicación binaria, sin transmision, o archivo cerrado&quot;);</span><span style='color:#898887;'>*/</span>
+       fflush(stdout);
+     } <b>else</b> <b>if</b> (!datablock &amp;&amp; !(datablock = calloc(<span style='color:#b08000;'>1</span>, conexion-&gt;blocksize))) {
+       printf(<span style='color:#bf0303;'>&quot;Imposible reservar bloque de talla %d</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conexion-&gt;blocksize);
+       fflush(stdout);
+     } <b>else</b> <b>if</b> (conexion-&gt;blocksize &lt; conn-&gt;content_len) {
+       printf(<span style='color:#bf0303;'>&quot;Recibida una trama mayor que el blocksize</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+       fflush(stdout);
+     } <b>else</b> {
+       printf(<span style='color:#bf0303;'>&quot;* &quot;</span>); fflush(stdout);
+       <b>if</b> (conn-&gt;content_len != fwrite((<span style='color:#0057ae;'>void</span> *) conn-&gt;content, <span style='color:#b08000;'>1</span>, conn-&gt;content_len, conexion-&gt;fdatos)) {
+         printf(<span style='color:#bf0303;'>&quot;error grabando datos</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+         fclose(conexion-&gt;fdatos);
+         conexion-&gt;fdatos      = NULL;
+         conexion-&gt;transmision = <span style='color:#b08000;'>0</span>;
+         conexion-&gt;nfdatos     = <span style='color:#b08000;'>0</span>;
+         conexion-&gt;blocksize   = <span style='color:#b08000;'>0</span>;
+         free(datablock);
+       } <b>else</b> <b>if</b> ((conexion-&gt;nfdatos -= conn-&gt;content_len)&lt;=<span style='color:#b08000;'>0</span>) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> fin </span><span style='color:#898887;'>*/</span>
+         printf(<span style='color:#bf0303;'>&quot;Fin de la transmision</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>); fflush(stdout);
+         fclose(conexion-&gt;fdatos);
+         conexion-&gt;fdatos      = NULL;
+         conexion-&gt;transmision = <span style='color:#b08000;'>0</span>;
+         conexion-&gt;nfdatos     = <span style='color:#b08000;'>0</span>;
+         conexion-&gt;blocksize   = <span style='color:#b08000;'>0</span>;
+         free(datablock);
+         datablock = NULL;
+       } <b>else</b> {
+         printf(<span style='color:#bf0303;'>&quot;.&quot;</span>); fflush(stdout);
+       }
+       
+     }
+  <span style='color:#898887;'>/*</span><span style='color:#898887;'> estamos en una primitiva </span><span style='color:#898887;'>*/</span>
+  } <b>else</b> {
+     <span style='color:#898887;'>/*</span><span style='color:#898887;'> Depuracion:</span>
+<span style='color:#898887;'>      </span><span style='color:#898887;'>*/</span>
+     printf(<span style='color:#bf0303;'>&quot;[%.*s]</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, (<span style='color:#0057ae;'>int</span>) conn-&gt;content_len, conn-&gt;content); fflush(stdout);
+     <b>if</b> (conn-&gt;content[<span style='color:#b08000;'>0</span>] = <span style='color:#924c9d;'>'/'</span>) {
+       <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/string &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+         printf(<span style='color:#bf0303;'>&quot;%s&gt; [%s]</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conexion-&gt;identidad, conn-&gt;content+<span style='color:#b08000;'>8</span>);
+<span style='color:#898887;'>/*</span><span style='color:#898887;'> /saludo id </span><span style='color:#898887;'>*/</span>
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/saludo &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+         strncpy(conexion-&gt;identidad, conn-&gt;content+<span style='color:#b08000;'>8</span>, <span style='color:#b08000;'>16</span>);
+         conexion-&gt;identidad[<span style='color:#b08000;'>15</span>] = <span style='color:#924c9d;'>'\0'</span>; <span style='color:#898887;'>/*</span><span style='color:#898887;'> trunca a NTS si rebosa </span><span style='color:#898887;'>*/</span>
+         printf(<span style='color:#bf0303;'>&quot;Saludo inicial desde &lt;dispositivo&gt; [%s]</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conexion-&gt;identidad);
+         printf(<span style='color:#bf0303;'>&quot;</span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>respondiendo RET00</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+         fflush(stdout);
+         mg_websocket_printf(conn, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;RET00 %d&quot;</span>, iconexiones);
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/estado &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/archiv &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/cierre &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/cierre &quot;</span>, <span style='color:#b08000;'>8</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/01 &quot;</span>, <span style='color:#b08000;'>4</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/02 &quot;</span>, <span style='color:#b08000;'>4</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/03 &quot;</span>, <span style='color:#b08000;'>4</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/04 &quot;</span>, <span style='color:#b08000;'>4</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/05 &quot;</span>, <span style='color:#b08000;'>4</span>)) {
+       } <b>else</b> <b>if</b> (!memcmp(conn-&gt;content, <span style='color:#bf0303;'>&quot;/06 &quot;</span>, <span style='color:#b08000;'>4</span>)) { <span style='color:#898887;'>/*</span><span style='color:#898887;'> RET from FILE- </span><span style='color:#898887;'>*/</span>
+         <span style='color:#0057ae;'>long</span> <span style='color:#0057ae;'>int</span> talla, blocksize;
+         *((<span style='color:#0057ae;'>char</span> *)conn-&gt;content+conn-&gt;content_len) = <span style='color:#924c9d;'>'\0'</span>;
+         
+         <span style='color:#898887;'>/*</span><span style='color:#898887;'> viene acompañado del tamaño del archivo y el blocksize </span><span style='color:#898887;'>*/</span>
+         talla = atol(strtok((<span style='color:#0057ae;'>char</span> *) conn-&gt;content+<span style='color:#b08000;'>4</span>, <span style='color:#bf0303;'>&quot; </span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>,&quot;</span>));
+         blocksize = atol(strtok(NULL, <span style='color:#bf0303;'>&quot; </span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>,&quot;</span>));
+         
+         <b>if</b> (<span style='color:#b08000;'>0</span> == talla || <span style='color:#b08000;'>0</span> == blocksize) {
+            printf(<span style='color:#bf0303;'>&quot;------------- %ld, %ld--------</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, talla, blocksize);
+            mg_websocket_printf(conn, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;RET61&quot;</span>);
+            printf(<span style='color:#bf0303;'>&quot;Error leyendo parámetros de transferencia de archivo en /06</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+            printf(<span style='color:#bf0303;'>&quot;</span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>respondiendo RET61</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>);
+            fflush(stdout);
+         } <b>else</b> {
+            conexion-&gt;nfdatos     = talla;
+            conexion-&gt;blocksize   = blocksize;
+            conexion-&gt;transmision = <span style='color:#b08000;'>1</span>;
+            conexion-&gt;fdatos = fopen(<span style='color:#bf0303;'>&quot;hoja.jpg&quot;</span>, <span style='color:#bf0303;'>&quot;ab&quot;</span>);
+            printf(<span style='color:#bf0303;'>&quot;Abierto &gt; hoja.jpg, talla=%ld, bloque=%ld</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, talla, blocksize);
+            printf(<span style='color:#bf0303;'>&quot;</span><span style='color:#924c9d;'>\t</span><span style='color:#bf0303;'>respondiendo RET60, %p, %p</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conn, conexion);
+            fflush(stdout);
+            mg_websocket_printf(conn, WEBSOCKET_OPCODE_TEXT, <span style='color:#bf0303;'>&quot;RET60&quot;</span>);
+         }
+       } <b>else</b> {
+         printf(<span style='color:#bf0303;'>&quot;Mandato de la raspi no reconocido [%s]</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conn-&gt;content); fflush(stdout);
+       }
+     } <b>else</b> {
+       printf(<span style='color:#bf0303;'>&quot;Mandato no reconocido desde &lt;%s&gt;</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, conexion-&gt;identidad);
+     }
+  }
+}
+
+<span style='color:#0057ae;'>int</span> main(<span style='color:#0057ae;'>void</span>) {
+  <b>struct</b> mg_server *server;
+
+  <span style='color:#898887;'>// Create and configure the server</span>
+  server = mg_create_server(NULL, ev_handler);
+  mg_set_option(server, <span style='color:#bf0303;'>&quot;listening_port&quot;</span>, <span style='color:#bf0303;'>&quot;8080&quot;</span>);
+
+  signal(SIGTERM, signal_handler);
+  signal(SIGINT, signal_handler);
+  
+  iconexiones = <span style='color:#b08000;'>0</span>;
+
+  <span style='color:#898887;'>// Serve request. Hit Ctrl-C to terminate the program</span>
+  printf(<span style='color:#bf0303;'>&quot;Starting on port %s</span><span style='color:#924c9d;'>\n</span><span style='color:#bf0303;'>&quot;</span>, mg_get_option(server, <span style='color:#bf0303;'>&quot;listening_port&quot;</span>));
+  <b>for</b> (;!nosvamos;) {
+    mg_poll_server(server, <span style='color:#b08000;'>100</span>);
+    <span style='color:#898887;'>/*</span><span style='color:#898887;'> en restful api pone 100, pero en ws 100 </span><span style='color:#898887;'>*/</span>
+  }
+
+  <span style='color:#898887;'>// Cleanup, and free server instance</span>
+  mg_destroy_server(&amp;server);
+
+  <b>return</b> <span style='color:#b08000;'>0</span>;
+}
+</pre>
+</body>
+</html>
